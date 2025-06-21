@@ -3,12 +3,12 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 import time
 import concurrent.futures
+import sys
+import argparse
 
-# Configuration
-SITEMAP_URL = "https://website.ca/sitemap.xml"
-PURGE_BASE = "https://website.ca/purge"
-REQUEST_DELAY = 0.5  # Seconds between requests
-WARMER_THREADS = 5   # Concurrent threads for cache warming
+# Default configuration (can be overridden by command-line args)
+REQUEST_DELAY = 0.5  # Seconds between purge requests
+WARMER_THREADS = 2   # Concurrent threads for cache warming
 NAMESPACE = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
 
 def fetch_sitemap(url):
@@ -43,14 +43,14 @@ def process_sitemap(sitemap_url, site_domain):
     print(f"Found {len(page_urls)} page URLs in {sitemap_url}")
     return page_urls
 
-def generate_purge_urls(page_urls):
+def generate_purge_urls(page_urls, purge_base):
     """Generate purge URLs from page URLs"""
     purge_urls = []
     
     for url in page_urls:
         parsed = urlparse(url)
         path = parsed.path if parsed.path else '/'
-        purge_url = f"{PURGE_BASE}{path}"
+        purge_url = f"{purge_base}{path}"
         
         # Preserve query strings if present
         if parsed.query:
@@ -60,7 +60,7 @@ def generate_purge_urls(page_urls):
     
     return purge_urls
 
-def send_purge_requests(urls):
+def send_purge_requests(urls, delay):
     """Send purge requests with rate limiting"""
     print(f"\nStarting purge process for {len(urls)} pages...")
     success_count = 0
@@ -78,7 +78,7 @@ def send_purge_requests(urls):
                 print(f"[{i+1}/{len(urls)}] FAILED ({status}): {url}")
                 failed_urls.append(url)
             
-            time.sleep(REQUEST_DELAY)
+            time.sleep(delay)
         except Exception as e:
             print(f"[{i+1}/{len(urls)}] ERROR: {url} - {str(e)}")
             failed_urls.append(url)
@@ -87,7 +87,7 @@ def send_purge_requests(urls):
     print(f"Failed: {len(urls) - success_count}/{len(urls)}")
     return failed_urls
 
-def warm_cache(urls, threads=WARMER_THREADS):
+def warm_cache(urls, threads):
     """Warm cache by visiting URLs with concurrent threads"""
     print(f"\nStarting cache warming for {len(urls)} pages...")
     print(f"Using {threads} concurrent threads")
@@ -125,35 +125,65 @@ def warm_cache(urls, threads=WARMER_THREADS):
     print(f"Failed: {len(urls) - success_count}/{len(urls)}")
     return failed_urls
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(
+        description='Cache Manager: Purge and warm cache for a website',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument('domain', help='Domain name (e.g., landgraflawncare.ca)')
+    parser.add_argument('--protocol', choices=['http', 'https'], default='https',
+                       help='Website protocol')
+    parser.add_argument('--delay', type=float, default=REQUEST_DELAY,
+                       help='Delay between purge requests (seconds)')
+    parser.add_argument('--threads', type=int, default=WARMER_THREADS,
+                       help='Concurrent threads for cache warming')
+    parser.add_argument('--skip-purge', action='store_true',
+                       help='Skip the cache purge phase')
+    parser.add_argument('--skip-warm', action='store_true',
+                       help='Skip the cache warming phase')
+    
+    args = parser.parse_args()
+    
+    # Set up URLs
+    base_url = f"{args.protocol}://{args.domain}"
+    sitemap_url = f"{base_url}/sitemap.xml"
+    purge_base = f"{base_url}/purge"
+    site_domain = urlparse(base_url).netloc
+    
     try:
-        # Get site domain for filtering
-        site_domain = urlparse(PURGE_BASE).netloc
-        
         # Process all sitemaps recursively
         print("="*60)
         print("SITEMAP PROCESSING PHASE")
         print("="*60)
-        all_page_urls = process_sitemap(SITEMAP_URL, site_domain)
+        all_page_urls = process_sitemap(sitemap_url, site_domain)
         
         if not all_page_urls:
-            print("No page URLs found for purging")
-            exit()
+            print("No page URLs found for processing")
+            return
             
         print(f"\nTotal pages found: {len(all_page_urls)}")
-        purge_targets = generate_purge_urls(all_page_urls)
+        purge_targets = generate_purge_urls(all_page_urls, purge_base)
+        
+        purge_failures = []
+        warm_failures = []
         
         # Purge phase
-        print("\n" + "="*60)
-        print("CACHE PURGE PHASE")
-        print("="*60)
-        purge_failures = send_purge_requests(purge_targets)
+        if not args.skip_purge:
+            print("\n" + "="*60)
+            print("CACHE PURGE PHASE")
+            print("="*60)
+            purge_failures = send_purge_requests(purge_targets, args.delay)
+        else:
+            print("\nSkipping cache purge phase")
         
         # Warm cache phase
-        print("\n" + "="*60)
-        print("CACHE WARMING PHASE")
-        print("="*60)
-        warm_failures = warm_cache(all_page_urls)
+        if not args.skip_warm:
+            print("\n" + "="*60)
+            print("CACHE WARMING PHASE")
+            print("="*60)
+            warm_failures = warm_cache(all_page_urls, args.threads)
+        else:
+            print("\nSkipping cache warming phase")
         
         # Final report
         print("\n" + "="*60)
@@ -177,9 +207,16 @@ if __name__ == "__main__":
         
     except requests.exceptions.RequestException as e:
         print(f"Network error: {str(e)}")
+        sys.exit(1)
     except ET.ParseError as e:
         print(f"XML parsing error: {str(e)}")
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\nOperation cancelled by user")
+        sys.exit(1)
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
